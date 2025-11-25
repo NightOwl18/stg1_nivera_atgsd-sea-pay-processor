@@ -4,6 +4,8 @@ from datetime import datetime
 from app.config import NAME_PREFIX, SIGNATURE_MARKER, SKIP_KEYWORD
 
 
+# ---------------------- Helpers ---------------------- #
+
 def parse_date(date_str):
     """Parse M/D/YYYY or M/D/YY."""
     for fmt in ("%m/%d/%Y", "%m/%d/%y"):
@@ -14,143 +16,133 @@ def parse_date(date_str):
     return None
 
 
-def clean_event_name(raw):
+def clean_ship_name(raw):
     """
-    Cleans a fully merged event string:
-
-    Handles:
-    - Multi-line names ("PAUL HAMILTON")
-    - Checkmarks (þ)
-    - Times (0000 2359)
-    - Parentheses (ASW T-1)
-    - Extra spacing
-    - Asterisks
+    Clean the ship name extracted from table columns.
+    
+    Removes:
+    - ASW parentheses
+    - times (0000, 2359, 0800, etc.)
+    - checkmark 'þ'
+    - extra spaces
     """
+    if not raw:
+        return ""
 
     raw = raw.replace("þ", " ")
 
-    # Remove parentheses like (ASW C-1)
+    # Remove parentheses blocks: (ASW C-1), (ASW T-1)
     raw = re.sub(r"\(.*?\)", " ", raw)
 
-    # Remove times like 0000 2359
+    # Remove times
     raw = re.sub(r"\b\d{3,4}\b", " ", raw)
 
     # Remove asterisks
     raw = raw.replace("*", " ")
 
-    # Collapse whitespace
+    # Collapse multiple spaces
     raw = re.sub(r"\s+", " ", raw)
 
     return raw.strip().upper()
 
 
-def group_events_by_ship(events):
+def group_by_ship(events):
     """
-    events: list[(date, merged_raw_event)]
-    Combine all entries for each ship into (ship, first_date, last_date)
+    events: list[(date, ship_name)]
+    
+    Returns: list[(ship, start_date, end_date)]
     """
     grouped = {}
-
-    for dt, raw in events:
-        ship = clean_event_name(raw)
-        if not ship:
-            continue
+    for dt, ship in events:
         grouped.setdefault(ship, []).append(dt)
 
     final = []
-    for ship, ship_dates in grouped.items():
-        ship_dates.sort()
-        final.append((ship, ship_dates[0], ship_dates[-1]))
+    for ship, dates in grouped.items():
+        sorted_dates = sorted(dates)
+        final.append((ship, sorted_dates[0], sorted_dates[-1]))
 
     return final
 
 
-def extract_sailors_and_events(pdf_path):
-    """
-    Returns:
-    [
-      {
-        "name": "FRANK HATTEN",
-        "events": [
-            ("PAUL HAMILTON", start, end),
-            ("CHOSIN", start, end),
-            ("ASHLAND", start, end)
-        ]
-      }
-    ]
-    """
+# ---------------------- Core Parser ---------------------- #
 
+def extract_sailors_and_events(pdf_path):
     sailors = []
 
     current_name = None
     current_events = []
 
-    pending_event = ""   # holds merged event text
-    pending_date = None  # holds the date of the current event block
-
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            lines = (page.extract_text() or "").split("\n")
 
-            for raw_line in lines:
-                line = raw_line.strip()
+            text = page.extract_text() or ""
+            lines = text.split("\n")
 
-                # 1. Detect sailor NAME line
+            # 1. Find sailor name
+            for line in lines:
                 if line.startswith(NAME_PREFIX):
-                    # Extract name before "SSN"
-                    after = line[len(NAME_PREFIX):].strip()
-                    if "SSN" in after:
-                        current_name = after.split("SSN", 1)[0].strip()
-                    else:
-                        current_name = after.strip()
+                    extracted = line[len(NAME_PREFIX):].strip()
+                    if "SSN" in extracted:
+                        extracted = extracted.split("SSN")[0].strip()
 
-                    # Save previous sailor
-                    if current_events:
+                    # Save previous sailor if any
+                    if current_name and current_events:
                         sailors.append({
-                            "name": current_saved_name,
-                            "events": group_events_by_ship(current_events)
+                            "name": current_name,
+                            "events": group_by_ship(current_events)
                         })
 
-                    current_saved_name = current_name
+                    current_name = extracted
                     current_events = []
-                    pending_event = ""
-                    pending_date = None
+                    break  # only one name per page
+
+            # 2. Read the table rows (REAL EVENT DATA)
+            table = page.extract_table()
+
+            if not table:
+                continue
+
+            for row in table:
+                if not row:
                     continue
 
-                # 2. Detect new EVENT START (starts with a date)
-                parts = line.split(" ", 1)
-                if len(parts) == 2:
-                    date_candidate, rest = parts
-                    dt = parse_date(date_candidate)
+                # table columns often look like:
+                # [ DATE , SHIP1 , SHIP2? , STARTTIME , ENDTIME ]
+                date_col = row[0]
 
-                    if dt:
-                        # Save previous event if one exists
-                        if pending_date and pending_event:
-                            current_events.append((pending_date, pending_event.strip()))
-
-                        # Begin new event block
-                        pending_date = dt
-                        pending_event = rest.strip()
-                        continue
-
-                # 3. Continuation lines for the same event
-                if pending_date:
-                    pending_event += " " + line
+                # Skip header rows or blank date cells
+                if not date_col or not isinstance(date_col, str):
                     continue
 
-                # 4. Detect SIGNATURE → end of sailor
-                if SIGNATURE_MARKER in line and current_saved_name:
-                    if pending_date and pending_event:
-                        current_events.append((pending_date, pending_event.strip()))
+                dt = parse_date(date_col.strip())
+                if not dt:
+                    continue  # not an event row
 
+                # Combine all ship-name fields (Event Column)
+                ship_parts = row[1:3]  # usually 2 columns for ship name
+                ship_raw = " ".join([p for p in ship_parts if p])
+
+                # Skip empties
+                if not ship_raw:
+                    continue
+
+                # Skip MITE entirely
+                if SKIP_KEYWORD in ship_raw.upper():
+                    continue
+
+                ship_clean = clean_ship_name(ship_raw)
+                if ship_clean:
+                    current_events.append((dt, ship_clean))
+
+            # 3. Detect signature -> end of sailor
+            for line in lines:
+                if SIGNATURE_MARKER in line and current_name:
                     sailors.append({
-                        "name": current_saved_name,
-                        "events": group_events_by_ship(current_events)
+                        "name": current_name,
+                        "events": group_by_ship(current_events)
                     })
-
-                    current_saved_name = None
+                    current_name = None
                     current_events = []
-                    pending_event = ""
-                    pending_date = None
+                    break
 
     return sailors
