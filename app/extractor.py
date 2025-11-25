@@ -16,18 +16,23 @@ def parse_date(date_str):
 
 def clean_event_name(raw):
     """
-    Cleans multi-line raw event strings:
-    - Merges lines
-    - Removes times (0000 2359)
-    - Removes (ASW ...)
-    - Removes þ checkmark
+    Cleans a fully merged event string:
+
+    Handles:
+    - Multi-line names ("PAUL HAMILTON")
+    - Checkmarks (þ)
+    - Times (0000 2359)
+    - Parentheses (ASW T-1)
+    - Extra spacing
+    - Asterisks
     """
+
     raw = raw.replace("þ", " ")
 
-    # Remove parentheses content
+    # Remove parentheses like (ASW C-1)
     raw = re.sub(r"\(.*?\)", " ", raw)
 
-    # Remove times
+    # Remove times like 0000 2359
     raw = re.sub(r"\b\d{3,4}\b", " ", raw)
 
     # Remove asterisks
@@ -40,27 +45,48 @@ def clean_event_name(raw):
 
 
 def group_events_by_ship(events):
+    """
+    events: list[(date, merged_raw_event)]
+    Combine all entries for each ship into (ship, first_date, last_date)
+    """
     grouped = {}
-    for dt, raw_event in events:
-        ship = clean_event_name(raw_event)
+
+    for dt, raw in events:
+        ship = clean_event_name(raw)
         if not ship:
             continue
         grouped.setdefault(ship, []).append(dt)
 
-    result = []
-    for ship, dates in grouped.items():
-        dates = sorted(dates)
-        result.append((ship, dates[0], dates[-1]))
-    return result
+    final = []
+    for ship, ship_dates in grouped.items():
+        ship_dates.sort()
+        final.append((ship, ship_dates[0], ship_dates[-1]))
+
+    return final
 
 
 def extract_sailors_and_events(pdf_path):
+    """
+    Returns:
+    [
+      {
+        "name": "FRANK HATTEN",
+        "events": [
+            ("PAUL HAMILTON", start, end),
+            ("CHOSIN", start, end),
+            ("ASHLAND", start, end)
+        ]
+      }
+    ]
+    """
+
     sailors = []
 
     current_name = None
     current_events = []
-    pending_event = ""  # Hold multi-line event names
-    pending_date = None
+
+    pending_event = ""   # holds merged event text
+    pending_date = None  # holds the date of the current event block
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
@@ -69,58 +95,60 @@ def extract_sailors_and_events(pdf_path):
             for raw_line in lines:
                 line = raw_line.strip()
 
-                # 1. Detect sailor name line
+                # 1. Detect sailor NAME line
                 if line.startswith(NAME_PREFIX):
+                    # Extract name before "SSN"
                     after = line[len(NAME_PREFIX):].strip()
                     if "SSN" in after:
-                        name_part = after.split("SSN", 1)[0].strip()
+                        current_name = after.split("SSN", 1)[0].strip()
                     else:
-                        name_part = after
+                        current_name = after.strip()
 
                     # Save previous sailor
-                    if current_name and current_events:
+                    if current_events:
                         sailors.append({
-                            "name": current_name,
+                            "name": current_saved_name,
                             "events": group_events_by_ship(current_events)
                         })
 
-                    current_name = name_part
+                    current_saved_name = current_name
                     current_events = []
                     pending_event = ""
                     pending_date = None
                     continue
 
-                # 2. Detect new DATE row (start of new event block)
+                # 2. Detect new EVENT START (starts with a date)
                 parts = line.split(" ", 1)
                 if len(parts) == 2:
                     date_candidate, rest = parts
                     dt = parse_date(date_candidate)
 
                     if dt:
-                        # Store previous event if pending
-                        if pending_event and pending_date:
-                            current_events.append((pending_date, pending_event))
+                        # Save previous event if one exists
+                        if pending_date and pending_event:
+                            current_events.append((pending_date, pending_event.strip()))
 
+                        # Begin new event block
                         pending_date = dt
                         pending_event = rest.strip()
                         continue
 
-                # 3. Otherwise, append continuation lines
-                if pending_date and line:
+                # 3. Continuation lines for the same event
+                if pending_date:
                     pending_event += " " + line
                     continue
 
-                # 4. Detect end-of-sailor block
-                if SIGNATURE_MARKER in line and current_name:
-                    if pending_event and pending_date:
-                        current_events.append((pending_date, pending_event))
+                # 4. Detect SIGNATURE → end of sailor
+                if SIGNATURE_MARKER in line and current_saved_name:
+                    if pending_date and pending_event:
+                        current_events.append((pending_date, pending_event.strip()))
 
                     sailors.append({
-                        "name": current_name,
+                        "name": current_saved_name,
                         "events": group_events_by_ship(current_events)
                     })
 
-                    current_name = None
+                    current_saved_name = None
                     current_events = []
                     pending_event = ""
                     pending_date = None
