@@ -1,4 +1,4 @@
-name: Build Docker Image
+name: Build & Publish Docker Image
 
 on:
   push:
@@ -7,6 +7,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v3
 
@@ -17,7 +20,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and Push
+      - name: Build and Push Image
         uses: docker/build-push-action@v5
         with:
           context: .
