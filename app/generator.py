@@ -1,71 +1,128 @@
 import os
-from datetime import date
-from PyPDF2 import PdfReader, PdfWriter
-from PyPDF2.generic import NameObject, BooleanObject
-from app.config import PG13_TEMPLATE_PATH, NAME_FIELD, DATE_FIELD, SHIP_FIELD
+import zipfile
+import tempfile
+from datetime import datetime
 
-def fmt_mdy_short(d: date) -> str:
-    """Format date as M/D/YY with no leading zero. Example: 8/4/25"""
-    return f"{d.month}/{d.day}/{str(d.year)[2:]}"
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
-def build_date_line(start: date, end: date) -> str:
-    """____. REPORT CAREER SEA PAY FROM 8/4/25 TO 8/8/25."""
-    return (
-        f"____. REPORT CAREER SEA PAY FROM {fmt_mdy_short(start)} "
-        f"TO {fmt_mdy_short(end)}."
+from app.extractor import extract_last_name
+
+
+# --------------------------------------------------------
+#   REGISTER FONTS
+# --------------------------------------------------------
+
+FONT_PATH = os.path.join(os.path.dirname(__file__), "fonts", "times.ttf")
+
+if os.path.exists(FONT_PATH):
+    pdfmetrics.registerFont(TTFont("TimesNR", FONT_PATH))
+else:
+    # fallback if font is missing (never recommended)
+    pdfmetrics.registerFont(TTFont("TimesNR", "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf"))
+
+
+# --------------------------------------------------------
+#   PG-13 PDF GENERATOR (AcroForm-like manual layout)
+# --------------------------------------------------------
+
+def generate_single_pg13(output_path, sailor_name, ship_name, start_date, end_date):
+    """
+    Create a single PG-13 PDF for one ship & date range.
+    """
+    c = canvas.Canvas(output_path, pagesize=letter)
+    c.setFont("TimesNR", 10)
+
+    # --------------------------------------------------------
+    #  HEADER
+    # --------------------------------------------------------
+    c.drawString(72, 740, "ADMINISTRATIVE REMARKS")
+    c.drawString(72, 725, "NAVPERS 1070/613")
+
+    # --------------------------------------------------------
+    #  NAME BLOCK
+    # --------------------------------------------------------
+    c.setFont("TimesNR", 10)
+    c.drawString(72, 700, f"NAME (LAST, FIRST, MIDDLE): {sailor_name}")
+
+    # --------------------------------------------------------
+    #  SUBJECT LINE
+    # --------------------------------------------------------
+    c.setFont("TimesNR", 10)
+    c.drawString(72, 675, "SUBJECT: SEA PAY CERTIFICATION")
+
+    # --------------------------------------------------------
+    #  BODY TEXT
+    # --------------------------------------------------------
+    c.setFont("TimesNR", 10)
+    line_y = 645
+
+    body = (
+        f"1. The following member is certified for SEA PAY while assigned to the ship named below.\n"
+        f"2. SHIP/STATION: {ship_name}\n"
+        f"   PERIOD: {start_date.strftime('%m/%d/%Y')} to {end_date.strftime('%m/%d/%Y')}\n"
+        f"3. This certification is submitted in accordance with DOD 7000.14-R and OPNAVINST 7200.14."
     )
 
-def build_ship_line(ship: str) -> str:
-    """Member performed eight continuous hours per day on-board: CHOSIN Category A vessel."""
-    return (
-        f"Member performed eight continuous hours per day on-board: "
-        f"{ship.upper()} Category A vessel."
-    )
+    for line in body.split("\n"):
+        c.drawString(72, line_y, line)
+        line_y -= 18
 
-def normalize_name_for_pg13(full_name: str) -> str:
-    """Convert 'BRANDON ANDERSEN' -> 'ANDERSEN, BRANDON'"""
-    parts = full_name.split()
-    if len(parts) == 1:
-        return parts[0].upper()
-    last = parts[-1].upper()
-    first = parts[0].upper()
-    middle = " ".join(p.upper() for p in parts[1:-1])
-    if middle:
-        return f"{last}, {first} {middle}"
-    return f"{last}, {first}"
+    # --------------------------------------------------------
+    #  SIGNATURE BLOCK
+    # --------------------------------------------------------
+    c.drawString(72, line_y - 20, "_______________________________")
+    c.drawString(72, line_y - 35, "SIGNATURE OF VERIFYING OFFICIAL & DATE")
 
-def generate_pg13_for_sailor(sailor, output_dir):
+    c.showPage()
+    c.save()
+
+
+# --------------------------------------------------------
+#   ZIP BUILDER
+# --------------------------------------------------------
+
+def generate_pg13_zip(sailor, output_dir=None):
     """
-    sailor: { "name": "BRANDON ANDERSEN", "events": [(ship, start, end), ...] }
+    Takes parsed sailor data:
+
+    sailor = {
+        "name": "BRANDON ANDERSEN",
+        "events": [
+            ("CHOSIN", date(2025,8,11), date(2025,8,13)),
+            ...
+        ]
+    }
+
+    And generates a ZIP containing one PG-13 per ship & date range.
     """
-    os.makedirs(output_dir, exist_ok=True)
-    name_pg13 = normalize_name_for_pg13(sailor["name"])
-    idx = 1
 
-    for ship, start, end in sailor["events"]:
-        reader = PdfReader(PG13_TEMPLATE_PATH)
-        writer = PdfWriter()
-        writer.add_page(reader.pages[0])
+    sailor_name = sailor["name"]
+    last_name = extract_last_name(sailor_name)
 
-        fields = {
-            NAME_FIELD: name_pg13,
-            DATE_FIELD: build_date_line(start, end),
-            SHIP_FIELD: build_ship_line(ship),
-        }
+    # Make temp directory for PDFs
+    if output_dir is None:
+        output_dir = tempfile.mkdtemp()
 
-        writer.update_page_form_field_values(writer.pages[0], fields)
+    pdf_folder = os.path.join(output_dir, "pg13_output")
+    os.makedirs(pdf_folder, exist_ok=True)
 
-        # Force viewers to regenerate appearance
-        if "/AcroForm" in writer._root_object:
-            writer._root_object["/AcroForm"].update(
-                {NameObject("/NeedAppearances"): BooleanObject(True)}
-            )
+    # --------------------------------------------------------
+    #  GENERATE ONE PG-13 PER SHIP GROUP
+    # --------------------------------------------------------
+    for ship, start_date, end_date in sailor["events"]:
+        filename = f"{last_name}_{ship}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.pdf"
+        filepath = os.path.join(pdf_folder, filename)
+        generate_single_pg13(filepath, sailor_name, ship, start_date, end_date)
 
-        safe_ship = ship.replace(" ", "_").upper()
-        out_name = f"PG13_{name_pg13.split(',')[0]}_{idx:02d}_{safe_ship}.pdf"
-        out_path = os.path.join(output_dir, out_name)
+    # --------------------------------------------------------
+    #  CREATE ZIP
+    # --------------------------------------------------------
+    zip_path = os.path.join(output_dir, f"{last_name}.zip")
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in os.listdir(pdf_folder):
+            zf.write(os.path.join(pdf_folder, f), f)
 
-        with open(out_path, "wb") as f:
-            writer.write(f)
-
-        idx += 1
+    return zip_path
