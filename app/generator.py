@@ -11,6 +11,7 @@ def format_mmddyy(date_obj):
 
 
 def generate_pg13_zip(sailor, output_dir):
+    # Use LAST name for zip filename
     last = sailor["name"].split()[0].upper()
     zip_path = os.path.join(output_dir, f"{last}.zip")
 
@@ -25,31 +26,43 @@ def generate_pg13_zip(sailor, output_dir):
 def make_pg13_pdf(name, ship, start, end, root_dir):
     output_path = os.path.join(root_dir, f"{ship}.pdf")
 
-    # Load the PG13 PDF template
+    # Load template
     reader = PdfReader(PG13_TEMPLATE_PATH)
     writer = PdfWriter()
-    writer.append_pages_from_reader(reader)
 
-    # Format fields
-    date_value = format_mmddyy(start)  # ONLY ONE DATE AS YOU INSTRUCTED
-    ship_value = f"Member performed eight continuous hours per day on-board: {ship} Category A vessel"
-    name_value = name
+    # Copy pages first
+    for page in reader.pages:
+        writer.add_page(page)
 
-    # Ensure these fields exist before writing
-    if writer.get_fields() is None:
+    # COPY ACROFORM EXACTLY or fields will NOT exist
+    if "/AcroForm" in reader.trailer["/Root"]:
         writer._root_object.update({
             "/AcroForm": reader.trailer["/Root"]["/AcroForm"]
         })
 
-    field_updates = {
-        "NAME": name_value,
-        "Date": date_value,
-        "SHIP": ship_value
-    }
+    # Get form fields from READER (NOT writer)
+    fields = reader.get_fields()
 
-    writer.update_page_form_field_values(writer.pages[0], field_updates)
+    # --- Required PG-13 formatting ---
+    date_from_to = f"{format_mmddyy(start)} TO {format_mmddyy(end)}"
+    ship_text = f"Member performed eight continuous hours per day on-board: {ship} Category A vessel"
+    name_text = name
 
-    # Save PDF
+    # Set field values
+    writer.update_page_form_field_values(
+        writer.pages[0],
+        {
+            "NAME": name_text,
+            "Date": date_from_to,
+            "SHIP": ship_text
+        }
+    )
+
+    # Must set NeedAppearances for fields to display properly
+    if "/AcroForm" in writer._root_object:
+        writer._root_object["/AcroForm"].update({"/NeedAppearances": True})
+
+    # Save output
     with open(output_path, "wb") as f:
         writer.write(f)
 
