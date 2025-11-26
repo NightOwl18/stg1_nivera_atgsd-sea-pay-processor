@@ -1,20 +1,35 @@
+# app/generator.py
+
 import os
 import zipfile
-from datetime import datetime
+from datetime import date
+
 from pypdf import PdfReader, PdfWriter
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
-from reportlab.lib.units import mm
+from pypdf.generic import NameObject, TextStringObject
+
 from app.config import PG13_TEMPLATE_PATH
 
 
-def format_mmddyy(date_obj):
-    return date_obj.strftime("%m/%d/%y")
+def _fmt_mmddyy(d: date) -> str:
+    """Return date in MM/DD/YY format."""
+    return d.strftime("%m/%d/%y")
 
 
 def generate_pg13_zip(sailor, output_dir):
-    last = sailor["name"].split()[0].upper()
-    zip_path = os.path.join(output_dir, f"{last}.zip")
+    """
+    Create a ZIP with one PG-13 PDF per ship for this sailor.
+
+    sailor = {
+        "name": "BRANDON ANDERSEN",
+        "events": [
+            ("PAUL HAMILTON", date_start, date_end),
+            ...
+        ]
+    }
+    """
+    # Use last name for the zip filename
+    last_name = sailor["name"].split()[-1].upper()
+    zip_path = os.path.join(output_dir, f"{last_name}.zip")
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for ship, start, end in sailor["events"]:
@@ -24,49 +39,79 @@ def generate_pg13_zip(sailor, output_dir):
     return zip_path
 
 
-def make_pg13_pdf(name, ship, start, end, root_dir):
-    output_path = os.path.join(root_dir, f"{ship}.pdf")
+def make_pg13_pdf(name: str, ship: str, start: date, end: date, root_dir: str) -> str:
+    """
+    Fill the NAVPERS 1070/613 PG-13 template using form fields.
 
-    # Load template
+    Fields in the template (from get_fields()):
+      - Subject
+      - Date
+      - SHIP
+      - NAME
+    """
+    # Read the PG-13 template
     reader = PdfReader(PG13_TEMPLATE_PATH)
-    template_page = reader.pages[0]
 
-    # Temporary overlay PDF
-    overlay_path = os.path.join(root_dir, "overlay.pdf")
-    c = canvas.Canvas(overlay_path, pagesize=letter)
+    # ------------------------------------------------------------------
+    # Build the text values we actually want to see on the finished form
+    # ------------------------------------------------------------------
+    subject_text = f"{_fmt_mmddyy(start)} TO {_fmt_mmddyy(end)}"
 
-    # === COORDINATES (you can adjust these if needed) ===
+    # This line prints exactly after "____.REPORT CAREER SEA PAY FROM"
+    date_text = (
+        f"____.REPORT CAREER SEA PAY FROM "
+        f"{_fmt_mmddyy(start)} TO {_fmt_mmddyy(end)}"
+    )
 
-    # Name field right under SHIP OR STATION:
-    c.drawString(40 * mm, 245 * mm, name)
+    # Only the ship name – the surrounding sentence is already printed
+    # on the form: "Member performed eight continuous hours per day
+    # on-board: [SHIP] Category A vessel."
+    ship_text = ship
 
-    # Subject field (example: "10/15/25 TO 10/25/25")
-    date_range = f"{format_mmddyy(start)} TO {format_mmddyy(end)}"
-    c.drawString(92 * mm, 233 * mm, date_range)
+    # Upper-case sailor name for consistency with your example
+    name_text = name.upper()
 
-    # Entitlement box: ship name only (cleaned)
-    c.drawString(40 * mm, 226 * mm, ship)
+    # ------------------------------------------------------------------
+    # Update AcroForm fields directly on the reader
+    # ------------------------------------------------------------------
+    root = reader.trailer["/Root"]
+    acroform = root.get("/AcroForm")
 
-    # “REPORT CAREER SEA PAY FROM” line
-    c.drawString(30 * mm, 212 * mm, f"{format_mmddyy(start)} TO {format_mmddyy(end)}")
+    if acroform is not None:
+        fields = acroform.get("/Fields", [])
+        for field in fields:
+            field_obj = field.get_object()
+            fname = field_obj.get("/T")
 
-    # Main body text (member performed…)
-    c.drawString(20 * mm, 195 * mm,
-                 f"Member performed eight continuous hours per day on-board: {ship} Category A vessel.")
+            if fname == "Subject":
+                field_obj.update(
+                    {NameObject("/V"): TextStringObject(subject_text)}
+                )
+            elif fname == "Date":
+                field_obj.update(
+                    {NameObject("/V"): TextStringObject(date_text)}
+                )
+            elif fname == "SHIP":
+                field_obj.update(
+                    {NameObject("/V"): TextStringObject(ship_text)}
+                )
+            elif fname == "NAME":
+                field_obj.update(
+                    {NameObject("/V"): TextStringObject(name_text)}
+                )
 
-    c.save()
-
-    # Read overlay
-    overlay_reader = PdfReader(overlay_path)
-    overlay_page = overlay_reader.pages[0]
-
-    # Merge overlay on top of template
-    template_page.merge_page(overlay_page)
-
-    # Write out final PDF
+    # ------------------------------------------------------------------
+    # Write out a new PDF, preserving the (now-updated) AcroForm
+    # ------------------------------------------------------------------
     writer = PdfWriter()
-    writer.add_page(template_page)
+    for page in reader.pages:
+        writer.add_page(page)
 
+    if acroform is not None:
+        # Re-attach the same AcroForm to the writer
+        writer._root_object.update({NameObject("/AcroForm"): acroform})
+
+    output_path = os.path.join(root_dir, f"{ship}.pdf")
     with open(output_path, "wb") as f:
         writer.write(f)
 
