@@ -1,9 +1,11 @@
 import os
 import zipfile
 from datetime import datetime
-from pypdf import PdfReader, PdfWriter
+from pypdf import PdfReader, PdfWriter, PageObject
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.units import inch
 from app.config import PG13_TEMPLATE_PATH
-
 
 
 def format_mmddyy(date_obj):
@@ -22,54 +24,54 @@ def generate_pg13_zip(sailor, output_dir):
     return zip_path
 
 
-def make_pg13_pdf(name, ship, start, end, root_dir):
-    output_path = os.path.join(root_dir, f"{ship}.pdf")
+def make_overlay(name, ship, date_str, overlay_path):
+    """
+    Create a transparent overlay PDF with text placed EXACTLY where it needs to go
+    on the PG-13 form.
+    """
 
-    reader = PdfReader(PG13_TEMPLATE_PATH)
+    c = canvas.Canvas(overlay_path, pagesize=letter)
+
+    # -------------------------------
+    # TEXT POSITIONS ON PG-13 FORM
+    # (Measured from your uploaded PG13 TEMPLATE)
+    # -------------------------------
+
+    # 1. Date goes after "____.REPORT CAREER SEA PAY FROM"
+    c.drawString(1.65 * inch, 8.05 * inch, date_str)
+
+    # 2. Ship name goes in the middle paragraph
+    c.drawString(2.15 * inch, 7.40 * inch, ship)
+
+    # 3. Sailor Name goes in NAME (LAST, FIRST, MIDDLE)
+    c.drawString(2.80 * inch, 5.70 * inch, name)
+
+    c.save()
+
+
+def make_pg13_pdf(name, ship, start, end, output_dir):
+    date_str = format_mmddyy(start)
+
+    overlay_path = os.path.join(output_dir, "overlay.pdf")
+    output_path = os.path.join(output_dir, f"{ship}.pdf")
+
+    # Create overlay PDF
+    make_overlay(name, ship, date_str, overlay_path)
+
+    # Read template + overlay
+    template_reader = PdfReader(PG13_TEMPLATE_PATH)
+    overlay_reader = PdfReader(overlay_path)
+
+    template_page = template_reader.pages[0]
+    overlay_page = overlay_reader.pages[0]
+
+    # Merge overlay onto template
+    template_page.merge_page(overlay_page)
+
+    # Write final PDF
     writer = PdfWriter()
+    writer.add_page(template_page)
 
-    # Copy pages
-    for page in reader.pages:
-        writer.add_page(page)
-
-    # Extract original fields
-    fields = reader.get_fields()
-
-    # Rebuild a clean AcroForm
-    writer._root_object.update({
-        "/AcroForm": {
-            "/Fields": []
-        }
-    })
-
-    # Add valid fields only
-    for field_key, field_obj in fields.items():
-        try:
-            writer._root_object["/AcroForm"]["/Fields"].append(
-                field_obj.indirect_reference
-            )
-        except:
-            continue
-
-    # FIELD CONTENT
-    date_str = f"{format_mmddyy(start)} TO {format_mmddyy(end)}. REPORT CAREER SEA PAY FROM"
-    ship_str = f"Member performed eight continuous hours per day on-board: {ship} Category A vessel"
-    name_str = name
-
-    writer.update_page_form_field_values(
-        writer.pages[0],
-        {
-            "NAME": name_str,
-            "Date": date_str,
-            "SHIP": ship_str
-        }
-    )
-
-    # Fix display
-    if "/AcroForm" in writer._root_object:
-        writer._root_object["/AcroForm"].update({"/NeedAppearances": True})
-
-    # Save final PDF
     with open(output_path, "wb") as f:
         writer.write(f)
 
