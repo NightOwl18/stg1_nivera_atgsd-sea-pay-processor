@@ -10,21 +10,13 @@
   </style>
 </head>
 <body>
+
   <h1>PG-13 Sea Pay Generator</h1>
-  <p>
-    Upload a SEA DUTY CERTIFICATION SHEET PDF. The app will:
-  </p>
-  <ul>
-    <li>Extract Sailor names and dates</li>
-    <li>Group days by ship (CHOSIN (ASW ...) → CHOSIN)</li>
-    <li>Skip MITE events</li>
-    <li>Generate NAVPERS 1070/613 PG-13s</li>
-    <li>Return a ZIP with folders per Sailor</li>
-  </ul>
+  <p>Upload a SEA DUTY CERTIFICATION SHEET PDF.</p>
 
   <form action="/" method="POST" enctype="multipart/form-data">
     <div class="box">
-      <span class="label">SEA DUTY CERTIFICATION SHEET PDF:</span><br>
+      <span class="label">PDF File:</span><br>
       <input type="file" name="pdf_file" accept="application/pdf" required>
     </div>
     <button type="submit">Generate PG-13 ZIP</button>
