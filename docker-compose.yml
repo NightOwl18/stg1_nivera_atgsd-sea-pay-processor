@@ -1,11 +1,13 @@
-version: "3.9"
+version: "3.8"
 
 services:
-  sea-pay-processor:
+  seapay-processor:
     build: .
-    container_name: sea-pay-processor
+    container_name: seapay-processor
     ports:
-      - "8092:8080"        # host:container
-    environment:
-      - SECRET_KEY=change-me
-    restart: unless-stopped
+      - "8092:8080"
+    volumes:
+      - /mnt/user/appdata/seapay/data:/data
+      - /mnt/user/appdata/seapay/templates_pdf:/templates
+      - /mnt/user/appdata/seapay/config:/config
+      - /mnt/user/appdata/seapay/output:/output
